@@ -6,8 +6,8 @@ import asyncio
 import shutil
 import logging
 from typing import AsyncIterator
-from base_service import BaseService
-from config.services.ml_config import settings, Settings
+from src.services.base_service import BaseService
+from src.config.services.ml_config import settings, Settings
 from . import utils as service_utils
 from . import n_models as models
 from contextlib import contextmanager
@@ -24,60 +24,6 @@ def log_duration(message: str):
 
 
 logger = logging.getLogger(__name__)
-
-# def copy_file_to_directory(source_path, target_directory):
-#     """
-#     Копирует файл из source_path в target_directory.
-    
-#     :param source_path: путь к исходному файлу
-#     :param target_directory: путь к целевой директории
-#     """
-#     try:
-#         # Проверяем, существует ли исходный файл
-#         if not os.path.isfile(source_path):
-#             print(f"Исходный файл не найден: {source_path}")
-#             return
-        
-#         # Проверяем, существует ли целевая директория
-#         if not os.path.isdir(target_directory):
-#             print(f"Целевая директория не найдена, создаем: {target_directory}")
-#             os.makedirs(target_directory)
-        
-#         # Формируем путь для файла в целевой директории
-#         destination_path = os.path.join(target_directory, os.path.basename(source_path))
-        
-#         # Копируем файл
-#         shutil.copy(source_path, destination_path)
-#         print(f"Файл успешно скопирован в: {destination_path}")
-#     except Exception as e:
-#         print(f"Произошла ошибка: {e}")
-
-# def move_file(source_dir, dest_dir, filename):
-#     source_path = os.path.join(source_dir, filename)
-#     dest_path = os.path.join(dest_dir, filename)
-    
-#     try:
-#         shutil.move(source_path, dest_path)
-#         print(f"Файл '{filename}' успешно перемещен из '{source_dir}' в '{dest_dir}'.")
-#     except FileNotFoundError:
-#         print(f"Файл '{filename}' не найден в директории '{source_dir}'.")
-#     except Exception as e:
-#         print(f"Произошла ошибка: {e}")
-        
-# def clean_directory(directory, allowed_items):
-#     for item in os.listdir(directory):
-#         item_path = os.path.join(directory, item)
-#         if item not in allowed_items:
-#             try:
-#                 if os.path.isfile(item_path) or os.path.islink(item_path):
-#                     os.remove(item_path)
-#                     print(f"Удалён файл: {item_path}")
-#                 elif os.path.isdir(item_path):
-#                     shutil.rmtree(item_path)
-#                     print(f"Удалена папка: {item_path}")
-#             except Exception as e:
-#                 print(f"Ошибка при удалении {item_path}: {e}")
-
 
 
 class MLService(BaseService):
