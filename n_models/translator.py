@@ -12,6 +12,29 @@ try:
 except Exception:
     ml_settings = None
 
+OPENAI_COMPATIBLE_MODEL_MARKERS = (
+    "llama",
+    "mistral",
+    "qwen",
+    "gemma",
+    "openchat",
+    "neural-chat",
+)
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 
 class Translator:
     def __init__(self, model_name="facebook/wmt19-en-ru", device=None):
@@ -109,15 +132,16 @@ class OpenAICompatibleTranslatorProvider:
         batch_size: int = 8,
         max_new_tokens: int = 256,
     ) -> Response:
-        del batch_size
         if not texts:
             return Response(True, None, [])
         results = []
-        for text in tqdm(texts, desc="Translating batches"):
-            response = self.translate(text, max_new_tokens=max_new_tokens)
-            if response.status is False:
-                return response
-            results.append(response.result)
+        for i in tqdm(range(0, len(texts), batch_size), desc="Translating batches"):
+            batch = texts[i:i + batch_size]
+            for text in batch:
+                response = self.translate(text, max_new_tokens=max_new_tokens)
+                if response.status is False:
+                    return response
+                results.append(response.result)
         return Response(True, None, results)
 
     def _translate_with_chat_completions(self, text: str, max_new_tokens: int) -> str:
@@ -165,7 +189,7 @@ class OpenAICompatibleTranslatorProvider:
         body = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:
-            headers["Authorization"] = f"******"
+            headers["Authorization"] = "Bearer " + self.api_key
         http_request = request.Request(
             f"{self.base_url}{path}",
             data=body,
@@ -198,6 +222,12 @@ class UniversalTranslator:
         self.provider = None
         resolved_model_type = model_type or self._detect_model_type(model_name)
         self.model_type = resolved_model_type
+        if resolved_model_type == "unknown":
+            raise ValueError(
+                f"Unsupported model: {model_name}. "
+                "Specify model_type='openai' or 'llama_cpp_openai' for llama.cpp "
+                "OpenAI-compatible servers."
+            )
 
         # -----------------------------------------
         # Auto-detection of model type
@@ -240,12 +270,12 @@ class UniversalTranslator:
             timeout = getattr(
                 ml_settings,
                 "TRANSLATOR_TIMEOUT",
-                int(os.getenv("TRANSLATOR_TIMEOUT", "120")),
+                _safe_int(os.getenv("TRANSLATOR_TIMEOUT"), 120),
             )
             temperature = getattr(
                 ml_settings,
                 "TRANSLATOR_TEMPERATURE",
-                float(os.getenv("TRANSLATOR_TEMPERATURE", "0")),
+                _safe_float(os.getenv("TRANSLATOR_TEMPERATURE"), 0.0),
             )
             self.provider = OpenAICompatibleTranslatorProvider(
                 model_name=model_name,
@@ -266,18 +296,15 @@ class UniversalTranslator:
     @staticmethod
     def _detect_model_type(model_name: str) -> str:
         model_name_lower = model_name.lower()
-        if "wmt19" in model_name:
+        if "wmt19" in model_name_lower:
             return "fsmt"
         if "marian" in model_name_lower or "opus100" in model_name_lower:
             return "marian"
         if "t5" in model_name_lower:
             return "t5"
-        if "LMT-60" in model_name or "NiuTrans" in model_name:
+        if "lmt-60" in model_name_lower or "niutrans" in model_name_lower:
             return "chatlm"
-        if any(
-            marker in model_name_lower
-            for marker in ("llama", "mistral", "qwen", "gemma", "openchat", "neural-chat")
-        ):
+        if any(marker in model_name_lower for marker in OPENAI_COMPATIBLE_MODEL_MARKERS):
             return "openai"
         if (
             os.getenv("TRANSLATOR_API_BASE")
@@ -287,11 +314,11 @@ class UniversalTranslator:
             return "openai"
         return "unknown"
 
-    def translate(self, text: str, max_new_tokens: int = 256) -> str:
-        with torch.no_grad():
-            if self.provider is not None:
-                return self.provider.translate(text, max_new_tokens=max_new_tokens)
+    def translate(self, text: str, max_new_tokens: int = 256) -> Response:
+        if self.provider is not None:
+            return self.provider.translate(text, max_new_tokens=max_new_tokens)
 
+        with torch.no_grad():
             if self.model_type == "t5":
                 try:
                     encoded = self.tokenizer(
