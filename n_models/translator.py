@@ -1,7 +1,16 @@
+import json
+import os
+from urllib import error, request
+
 from transformers import FSMTForConditionalGeneration, FSMTTokenizer
 import torch
 from tqdm import tqdm
 from ..utils import Response
+
+try:
+    from src.config.services.ml_config import settings as ml_settings
+except Exception:
+    ml_settings = None
 
 
 class Translator:
@@ -57,6 +66,122 @@ from transformers import (
 )
 
 
+class OpenAICompatibleTranslatorProvider:
+    def __init__(
+        self,
+        model_name: str,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        system_prompt: str | None = None,
+        timeout: int = 120,
+        temperature: float = 0.0,
+    ):
+        self.model_name = model_name
+        self.base_url = (base_url or "http://127.0.0.1:8080").rstrip("/")
+        self.api_key = api_key or "sk-no-key-required"
+        self.system_prompt = system_prompt or (
+            "Translate the user text from English to Russian. "
+            "Return only the translated text."
+        )
+        self.timeout = timeout
+        self.temperature = temperature
+
+    def translate(self, text: str, max_new_tokens: int = 256) -> Response:
+        if not text.strip():
+            return Response(True, None, text)
+        try:
+            translation = self._translate_with_chat_completions(text, max_new_tokens)
+            return Response(True, None, translation)
+        except Exception as chat_error:
+            try:
+                translation = self._translate_with_completions(text, max_new_tokens)
+                return Response(True, None, translation)
+            except Exception as completion_error:
+                return Response(
+                    False,
+                    f"chat_completions_error={chat_error}; completions_error={completion_error}",
+                    None,
+                )
+
+    def batch_translate(
+        self,
+        texts: list,
+        batch_size: int = 8,
+        max_new_tokens: int = 256,
+    ) -> Response:
+        del batch_size
+        if not texts:
+            return Response(True, None, [])
+        results = []
+        for text in tqdm(texts, desc="Translating batches"):
+            response = self.translate(text, max_new_tokens=max_new_tokens)
+            if response.status is False:
+                return response
+            results.append(response.result)
+        return Response(True, None, results)
+
+    def _translate_with_chat_completions(self, text: str, max_new_tokens: int) -> str:
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": text},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": max_new_tokens,
+        }
+        response = self._post_json("/v1/chat/completions", payload)
+        choice = response["choices"][0]
+        message = choice.get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        translation = str(content).strip()
+        if not translation:
+            raise ValueError("Empty translation returned from chat completions")
+        return translation
+
+    def _translate_with_completions(self, text: str, max_new_tokens: int) -> str:
+        payload = {
+            "model": self.model_name,
+            "prompt": (
+                f"{self.system_prompt}\n\n"
+                f"Text:\n{text}\n\n"
+                "Translation:"
+            ),
+            "temperature": self.temperature,
+            "max_tokens": max_new_tokens,
+        }
+        response = self._post_json("/v1/completions", payload)
+        translation = str(response["choices"][0].get("text", "")).strip()
+        if not translation:
+            raise ValueError("Empty translation returned from completions")
+        return translation
+
+    def _post_json(self, path: str, payload: dict) -> dict:
+        body = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"******"
+        http_request = request.Request(
+            f"{self.base_url}{path}",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with request.urlopen(http_request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"HTTP {exc.code} returned by {self.base_url}{path}: {details}"
+            ) from exc
+
+
 class UniversalTranslator:
     """
     Универсальный переводчик, поддерживающий:
@@ -70,45 +195,91 @@ class UniversalTranslator:
     def __init__(self, model_name: str, device: str = None, model_type: str = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model_name = model_name
+        self.provider = None
+        resolved_model_type = model_type or self._detect_model_type(model_name)
+        self.model_type = resolved_model_type
 
         # -----------------------------------------
         # Auto-detection of model type
         # -----------------------------------------
-        if model_type is not None:
-            self.model_type = model_type
-        if "wmt19" in model_name or model_type == 'fsmt':
-            self.model_type = "fsmt"
+        if resolved_model_type == 'fsmt':
             self.tokenizer = FSMTTokenizer.from_pretrained(model_name)
             self.model = FSMTForConditionalGeneration.from_pretrained(model_name)
 
-        elif "marian" in model_name or "opus100" in model_name or model_type == 'marian':
-            self.model_type = "marian"
+        elif resolved_model_type == 'marian':
             self.tokenizer = MarianTokenizer.from_pretrained(model_name)
             self.model = MarianMTModel.from_pretrained(model_name)
 
-        elif "t5" in model_name or model_type == 't5':
-            self.model_type = "t5"
+        elif resolved_model_type == 't5':
             self.tokenizer = T5Tokenizer.from_pretrained(model_name)
             self.model = T5ForConditionalGeneration.from_pretrained(model_name)
 
-        elif "LMT-60" in model_name or "NiuTrans" in model_name or model_type == 'chatlm':
-            # NEW: support for NiuTrans/LMT-60-8B
-            self.model_type = "chatlm"
+        elif resolved_model_type == 'chatlm':
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
                 padding_side="left"
             )
             self.model = AutoModelForCausalLM.from_pretrained(model_name)
 
+        elif resolved_model_type in {'openai', 'llama_cpp_openai'}:
+            base_url = getattr(
+                ml_settings,
+                "TRANSLATOR_API_BASE",
+                os.getenv("TRANSLATOR_API_BASE", os.getenv("OPENAI_BASE_URL")),
+            )
+            api_key = getattr(
+                ml_settings,
+                "TRANSLATOR_API_KEY",
+                os.getenv("TRANSLATOR_API_KEY", os.getenv("OPENAI_API_KEY")),
+            )
+            system_prompt = getattr(
+                ml_settings,
+                "TRANSLATOR_SYSTEM_PROMPT",
+                os.getenv("TRANSLATOR_SYSTEM_PROMPT"),
+            )
+            timeout = getattr(
+                ml_settings,
+                "TRANSLATOR_TIMEOUT",
+                int(os.getenv("TRANSLATOR_TIMEOUT", "120")),
+            )
+            temperature = getattr(
+                ml_settings,
+                "TRANSLATOR_TEMPERATURE",
+                float(os.getenv("TRANSLATOR_TEMPERATURE", "0")),
+            )
+            self.provider = OpenAICompatibleTranslatorProvider(
+                model_name=model_name,
+                base_url=base_url,
+                api_key=api_key,
+                system_prompt=system_prompt,
+                timeout=timeout,
+                temperature=temperature,
+            )
+
         else:
             raise ValueError(f"Unsupported model: {model_name}")
 
-        # Move model to device
-        self.model.to(self.device)
-        self.model.eval()
+        if self.provider is None:
+            self.model.to(self.device)
+            self.model.eval()
+
+    @staticmethod
+    def _detect_model_type(model_name: str) -> str:
+        if "wmt19" in model_name:
+            return "fsmt"
+        if "marian" in model_name or "opus100" in model_name:
+            return "marian"
+        if "t5" in model_name:
+            return "t5"
+        if "LMT-60" in model_name or "NiuTrans" in model_name:
+            return "chatlm"
+        return "openai"
 
     def translate(self, text: str, max_new_tokens: int = 256) -> str:
         with torch.no_grad():
+            if self.provider is not None:
+                return self.provider.translate(text, max_new_tokens=max_new_tokens)
+
             if self.model_type == "t5":
                 try:
                     encoded = self.tokenizer(
@@ -149,6 +320,13 @@ class UniversalTranslator:
 
     def batch_translate(self, texts: list, batch_size: int = 8, max_new_tokens: int = 256):
         results = []
+
+        if self.provider is not None:
+            return self.provider.batch_translate(
+                texts,
+                batch_size=batch_size,
+                max_new_tokens=max_new_tokens,
+            )
 
         # -----------------------------------------------------
         # LMT-60-8B: batch mode via chat template
