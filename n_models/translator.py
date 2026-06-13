@@ -265,15 +265,27 @@ class UniversalTranslator:
 
     @staticmethod
     def _detect_model_type(model_name: str) -> str:
+        model_name_lower = model_name.lower()
         if "wmt19" in model_name:
             return "fsmt"
-        if "marian" in model_name or "opus100" in model_name:
+        if "marian" in model_name_lower or "opus100" in model_name_lower:
             return "marian"
-        if "t5" in model_name:
+        if "t5" in model_name_lower:
             return "t5"
         if "LMT-60" in model_name or "NiuTrans" in model_name:
             return "chatlm"
-        return "openai"
+        if any(
+            marker in model_name_lower
+            for marker in ("llama", "mistral", "qwen", "gemma", "openchat", "neural-chat")
+        ):
+            return "openai"
+        if (
+            os.getenv("TRANSLATOR_API_BASE")
+            or os.getenv("OPENAI_BASE_URL")
+            or getattr(ml_settings, "TRANSLATOR_API_BASE", None)
+        ):
+            return "openai"
+        return "unknown"
 
     def translate(self, text: str, max_new_tokens: int = 256) -> str:
         with torch.no_grad():
